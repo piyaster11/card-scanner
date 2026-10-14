@@ -1,7 +1,8 @@
 'use strict';
 const API='https://api.pokemontcg.io/v2/cards';
 const $=id=>document.getElementById(id);
-let worker=null, workerReady=null, stream=null, fx={rate:36.5,src:'fallback'};
+let worker=null, workerReady=null, stream=null, fx={rate:33.5,eur:0.92,src:'fallback'};
+const TDX='https://api.tcgdex.net/v2/en';
 const STOP=new Set('HP BASIC STAGE EVOLVES FROM POKEMON POKÉMON PSA GEM MINT MT NM EX VG GOOD TRAINER ENERGY ITEM SUPPORTER ABILITY WEAKNESS RESISTANCE RETREAT ILLUS DOUBLE RARE ULTRA SECRET ILLUSTRATION SPECIAL THE AND OF PROMO HOLO REVERSE JAPANESE ENGLISH CARD GAME SET'.split(' '));
 
 /* ---------- OCR ---------- */
@@ -81,33 +82,71 @@ async function q(query,size=30){
 }
 function pruneCache(){Object.keys(localStorage).filter(k=>k.startsWith('q:')).forEach(k=>localStorage.removeItem(k))}
 const esc=s=>String(s).replace(/"/g,'');
-async function findCards(p){
+/* ---------- TCGdex (fast, fresh prices) ---------- */
+const stripN=n=>String(n||'').replace(/^0+(?=\w)/,'').toLowerCase();
+const mkey=c=>norm(c.name).trim()+'|'+stripN(c.number)+'|'+(c.set.printedTotal||'');
+async function tdxJSON(path){const key='t:'+path,c=JSON.parse(localStorage.getItem(key)||'null');if(c&&Date.now()-c.t<6*3600e3)return c.d;
+  const r=await fetch(TDX+path);if(!r.ok)throw new Error('TCGdex '+r.status);const d=await r.json();try{localStorage.setItem(key,JSON.stringify({t:Date.now(),d}))}catch(e){pruneCache()}return d}
+function fromTdx(d){return{id:'tdx:'+d.id,tdxId:d.id,name:d.name,number:stripN(d.localId),rarity:d.rarity,src:'TCGdex',
+  set:{name:d.set?.name||'',series:'',printedTotal:d.set?.cardCount?.official||'',releaseDate:''},
+  images:{small:d.image?d.image+'/low.webp':'',large:d.image?d.image+'/high.webp':''},tdx:d.pricing||null}}
+async function tdxFind(p,cand){
+  const qs=[];
+  if(p.number&&p.total)qs.push(`/cards?localId=${encodeURIComponent(p.number)}&set.cardCount.official=${p.total}`);
+  cand.slice(0,2).forEach(w=>qs.push(p.number?`/cards?name=${encodeURIComponent(w)}&localId=${encodeURIComponent(p.number)}`:`/cards?name=${encodeURIComponent(w)}&pagination:itemsPerPage=30`));
+  const briefs=new Map();(await Promise.allSettled(qs.map(tdxJSON))).forEach(r=>r.status==='fulfilled'&&Array.isArray(r.value)&&r.value.forEach(b=>briefs.set(b.id,b)));
+  // pre-rank briefs, fetch details for top 6 only
+  const pre=[...briefs.values()].map(b=>({b,s:score({name:b.name,number:stripN(b.localId),set:{printedTotal:p.total||'',name:''}},p)})).sort((x,y)=>y.s-x.s).slice(0,6);
+  const full=await Promise.allSettled(pre.map(x=>tdxJSON('/cards/'+encodeURIComponent(x.b.id))));
+  return full.filter(r=>r.status==='fulfilled').map(r=>fromTdx(r.value));
+}
+async function tdxPricingFor(c){ // attach TCGdex prices to a pokemontcg card
+  if(c.tdx!==undefined)return c.tdx;
+  try{const l=await tdxJSON(`/cards?name=${encodeURIComponent('eq:'+c.name)}&localId=${encodeURIComponent(c.number)}`);
+    const hits=(Array.isArray(l)?l:[]).filter(b=>stripN(b.localId)===stripN(c.number));
+    for(const b of hits.slice(0,4)){const d=await tdxJSON('/cards/'+encodeURIComponent(b.id));if(String(d.set?.cardCount?.official)===String(c.set.printedTotal)){c.tdx=d.pricing||null;c.tdxId=d.id;return c.tdx}}
+  }catch(e){}
+  c.tdx=null;return null}
+const timeout=(pr,ms)=>Promise.race([pr,new Promise(r=>setTimeout(()=>r('__timeout'),ms))]);
+
+async function ptcgFind(p,cand){
   const pool=new Map();const add=a=>a.forEach(c=>pool.set(c.id,c));
-  const rank=()=>[...pool.values()].map(c=>({c,s:score(c,p)})).sort((a,b)=>b.s-a.s).filter(x=>x.s>0).slice(0,9);
+  const rank=()=>[...pool.values()].map(c=>({c,s:score(c,p)})).sort((a,b)=>b.s-a.s).filter(x=>x.s>0);
   const run=async jobs=>(await Promise.allSettled(jobs)).forEach(r=>r.status==='fulfilled'&&add(r.value));
-  const clean=w=>w.replace(/[^A-Za-z0-9-]/g,'');
-  const cand=[...new Set([...p.words.filter(w=>w.length>=4).slice(0,2),...[...p.words].sort((a,b)=>b.length-a.length).slice(0,1)])].map(clean).filter(w=>w.length>=3);
-  // stage 1: exact collector number (fast, precise)
   if(p.number&&p.total)await run([q(`number:"${esc(p.number)}" set.printedTotal:${p.total}`,50)]);
   else if(p.number&&p.psa&&cand[0])await run([q(`name:${cand[0]}* number:"${esc(p.number)}"`,30)]);
-  let r=rank();if(r.length&&r[0].s>=9)return r;
-  // stage 2: name words (top of card first)
-  const jobs=cand.slice(0,2).map(w=>q(p.number?`name:${w}* number:"${esc(p.number)}"`:`name:${w}*`,p.number?30:40));
-  await run(jobs);r=rank();if(r.length&&r[0].s>=7)return r;
+  let r=rank();if(r.length&&r[0].s>=9)return [...pool.values()];
+  await run(cand.slice(0,2).map(w=>q(p.number?`name:${w}* number:"${esc(p.number)}"`:`name:${w}*`,p.number?30:40)));
+  r=rank();if(r.length&&r[0].s>=7)return [...pool.values()];
   await run(cand.slice(0,2).filter(()=>p.number).map(w=>q(`name:${w}*`,60)));
-  return rank();
+  return [...pool.values()];
+}
+async function findCards(p){
+  const clean=w=>w.replace(/[^A-Za-z0-9-]/g,'');
+  const cand=[...new Set([...p.words.filter(w=>w.length>=4).slice(0,2),...[...p.words].sort((a,b)=>b.length-a.length).slice(0,1)])].map(clean).filter(w=>w.length>=3);
+  const tP=tdxFind(p,cand).catch(()=>[]);const pP=ptcgFind(p,cand).catch(()=>[]);
+  // TCGdex is usually <1s; give pokemontcg.io ~3s after TCGdex answers (or 3s total), then go with what we have
+  const tdx=await timeout(tP,6000);const tdxList=tdx==='__timeout'?[]:tdx;
+  let ptcg=await timeout(pP,tdxList.length?3000:8000);if(ptcg==='__timeout')ptcg=[];
+  const merged=new Map();
+  ptcg.forEach(c=>{c.src='pokemontcg.io';merged.set(mkey(c),c)});
+  tdxList.forEach(t=>{const k=mkey(t),m=merged.get(k);if(m){m.tdx=t.tdx;m.tdxId=t.tdxId;m.src='pokemontcg.io + TCGdex'}else merged.set(k,t)});
+  window.__srcStats={tdx:tdxList.length,ptcg:ptcg.length};
+  return [...merged.values()].map(c=>({c,s:score(c,p)})).sort((a,b)=>b.s-a.s).filter(x=>x.s>0).slice(0,9);
 }
 
 /* ---------- UI ---------- */
 const money=(v,cur='$')=>v==null||v===0?'—':cur+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const thb=v=>v?'฿'+Math.round(v*fx.rate).toLocaleString():'—';
-function bestPrice(c){const p=c.tcgplayer&&c.tcgplayer.prices;if(p){for(const k of['holofoil','normal','1stEditionHolofoil','reverseHolofoil','unlimitedHolofoil','1stEdition','unlimited'])if(p[k]&&(p[k].market||p[k].mid))return{usd:p[k].market||p[k].mid,variant:k}}
-  const cm=c.cardmarket&&c.cardmarket.prices;if(cm&&cm.trendPrice)return{usd:cm.trendPrice*(fx.eur?1/fx.eur:1.08),variant:'cardmarket (EUR→USD)'};return null}
+function bestPrice(c){const tt=c.tdx&&c.tdx.tcgplayer;if(tt){for(const k of['holofoil','normal','reverse-holofoil','reverseHolofoil','1st-edition-holofoil','1st-edition','unlimited-holofoil'])if(tt[k]&&(tt[k].marketPrice||tt[k].midPrice))return{usd:tt[k].marketPrice||tt[k].midPrice,variant:k,src:'TCGdex→TCGplayer'};for(const[k,v]of Object.entries(tt))if(v&&v.marketPrice)return{usd:v.marketPrice,variant:k,src:'TCGdex→TCGplayer'}}
+  const p=c.tcgplayer&&c.tcgplayer.prices;if(p){for(const k of['holofoil','normal','1stEditionHolofoil','reverseHolofoil','unlimitedHolofoil','1stEdition','unlimited'])if(p[k]&&(p[k].market||p[k].mid))return{usd:p[k].market||p[k].mid,variant:k,src:'pokemontcg.io→TCGplayer'}}
+  const tcm=c.tdx&&c.tdx.cardmarket;if(!p&&tcm&&(tcm.trend||tcm.avg))return{usd:(tcm.trend||tcm.avg)/(fx.eur||0.92),variant:'cardmarket (EUR→USD)',src:'TCGdex→Cardmarket'};
+  const cm=c.cardmarket&&c.cardmarket.prices;if(cm&&cm.trendPrice)return{usd:cm.trendPrice*(fx.eur?1/fx.eur:1.08),variant:'cardmarket (EUR→USD)',src:'pokemontcg.io→Cardmarket'};return null}
 function status(t){$('status').textContent=t}
 function showMatches(list,p){
   $('matches').innerHTML='';
   if(list.length>1)list.forEach(({c})=>{const bp=bestPrice(c);const d=document.createElement('div');d.className='match';
-    d.innerHTML=`<img loading="lazy" src="${c.images.small}" alt=""><div>${c.name}</div><div class="muted">${c.set.name} #${c.number}</div><b>${bp?money(bp.usd):'—'}</b>`;
+    d.innerHTML=`<img loading="lazy" src="${c.images.small}" alt=""><div>${c.name}</div><div class="muted">${c.set.name} #${c.number}</div><div class=src>${c.src||''}</div><b>${bp?money(bp.usd):'—'}</b>`;
     d.onclick=()=>{showResult(c,p);window.scrollTo({top:$('result').offsetTop-10,behavior:'smooth'})};$('matches').appendChild(d)});
 }
 function links(c,p){
@@ -126,20 +165,28 @@ function showResult(c,p,save=true){
   let rows=Object.entries(tp).map(([k,v])=>`<tr><td>${k}</td><td><b>${money(v.market)}</b></td><td>${money(v.low)}</td><td>${money(v.mid)}</td><td>${money(v.high)}</td></tr>`).join('');
   const psa=p&&p.psa?`<div class="grade">PSA ${p.grade||'grade ?'}${p.cert?' · cert '+p.cert:''}</div><div class="muted">Prices below are RAW (ungraded). Graded sold prices: tap eBay SOLD / 130point — no free graded-price API exists.</div>`:'';
   $('result').innerHTML=`<div class="card"><img src="${c.images.large||c.images.small}" alt="">
-  <div class="info"><h2>${c.name}</h2><div class="muted">${c.set.name} (${c.set.series}) · #${c.number}/${c.set.printedTotal} · ${c.rarity||''}</div>${psa}
-  <div class="big">${bp?money(bp.usd):'No price'}</div><div class="thb">${bp?thb(bp.usd):''}</div><div class="muted">${bp?bp.variant+' market':''} · 1 USD = ${fx.rate.toFixed(2)} THB</div></div>
-  ${rows?`<table><tr class="muted"><td>TCGplayer</td><td>Market</td><td>Low</td><td>Mid</td><td>High</td></tr>${rows}</table><div class="muted">TCGplayer updated ${c.tcgplayer.updatedAt}</div>`:''}
-  ${cm?`<table><tr class="muted"><td>Cardmarket (EUR)</td><td>Trend</td><td>Avg sell</td><td>30d avg</td><td>Low</td></tr><tr><td>normal</td><td><b>${money(cm.trendPrice,'€')}</b></td><td>${money(cm.averageSellPrice,'€')}</td><td>${money(cm.avg30,'€')}</td><td>${money(cm.lowPrice,'€')}</td></tr>${cm.reverseHoloTrend?`<tr><td>reverse</td><td>${money(cm.reverseHoloTrend,'€')}</td><td>${money(cm.reverseHoloSell,'€')}</td><td>${money(cm.reverseHoloAvg30,'€')}</td><td>${money(cm.reverseHoloLow,'€')}</td></tr>`:''}</table><div class="muted">Cardmarket updated ${c.cardmarket.updatedAt}</div>`:''}
+  <div class="info"><h2>${c.name}</h2><div class="muted">${c.set.name} ${c.set.series?'('+c.set.series+')':''} · #${c.number}/${c.set.printedTotal} · ${c.rarity||''}</div>${psa}
+  <div class="big">${bp?money(bp.usd):'No price'}</div><div class="thb">${bp?thb(bp.usd):''}</div><div class="muted">${bp?bp.variant+' market · source: '+bp.src:''} · 1 USD = ${fx.rate.toFixed(2)} THB</div></div>
+  ${rows?`<table><tr class="muted"><td>TCGplayer <span class=src>via pokemontcg.io</span></td><td>Market</td><td>Low</td><td>Mid</td><td>High</td></tr>${rows}</table><div class="muted">TCGplayer updated ${c.tcgplayer.updatedAt}</div>`:''}
+  ${cm?`<table><tr class="muted"><td>Cardmarket € <span class=src>via pokemontcg.io</span></td><td>Trend</td><td>Avg sell</td><td>30d avg</td><td>Low</td></tr><tr><td>normal</td><td><b>${money(cm.trendPrice,'€')}</b></td><td>${money(cm.averageSellPrice,'€')}</td><td>${money(cm.avg30,'€')}</td><td>${money(cm.lowPrice,'€')}</td></tr>${cm.reverseHoloTrend?`<tr><td>reverse</td><td>${money(cm.reverseHoloTrend,'€')}</td><td>${money(cm.reverseHoloSell,'€')}</td><td>${money(cm.reverseHoloAvg30,'€')}</td><td>${money(cm.reverseHoloLow,'€')}</td></tr>`:''}</table><div class="muted">Cardmarket updated ${c.cardmarket.updatedAt}</div>`:''}
+  ${tdxTables(c)}<div class="muted" id="tdxNote">${c.tdx===undefined?'Checking TCGdex for fresher prices…':''}</div>
   <div class="links">${links(c,p)}</div></div>`;
+  if(c.tdx===undefined)tdxPricingFor(c).then(()=>{if(window.__shown===c)showResult(c,p,false)});
+  window.__shown=c;
   if(save)addHistory(c,p,bp);
 }
+function tdxTables(c){const t=c.tdx;if(!t)return '';let h='';
+  const tp=t.tcgplayer;if(tp){const rows=Object.entries(tp).filter(([k,v])=>v&&typeof v==='object').map(([k,v])=>`<tr><td>${k}</td><td><b>${money(v.marketPrice)}</b></td><td>${money(v.lowPrice)}</td><td>${money(v.midPrice)}</td><td>${money(v.highPrice)}</td></tr>`).join('');
+    if(rows)h+=`<table><tr class="muted"><td>TCGplayer <span class=src>via TCGdex</span></td><td>Market</td><td>Low</td><td>Mid</td><td>High</td></tr>${rows}</table><div class="muted">TCGdex/TCGplayer updated ${(tp.updated||'').slice(0,10)}</div>`}
+  const cm=t.cardmarket;if(cm)h+=`<table><tr class="muted"><td>Cardmarket € <span class=src>via TCGdex</span></td><td>Trend</td><td>Avg</td><td>30d avg</td><td>Low</td></tr><tr><td>normal</td><td><b>${money(cm.trend,'€')}</b></td><td>${money(cm.avg,'€')}</td><td>${money(cm.avg30,'€')}</td><td>${money(cm.low,'€')}</td></tr>${cm['trend-holo']?`<tr><td>holo/rev</td><td>${money(cm['trend-holo'],'€')}</td><td>${money(cm['avg-holo'],'€')}</td><td>${money(cm['avg30-holo'],'€')}</td><td>${money(cm['low-holo'],'€')}</td></tr>`:''}</table><div class="muted">TCGdex/Cardmarket updated ${(cm.updated||'').slice(0,10)}</div>`;
+  return h}
 /* history */
 const H=()=>JSON.parse(localStorage.getItem('hist')||'[]');
 function addHistory(c,p,bp){const h=H().filter(x=>!(x.id===c.id&&x.grade===(p?.grade||'')));h.unshift({id:c.id,name:c.name,set:c.set.name,num:c.number,img:c.images.small,usd:bp?bp.usd:0,grade:p?.psa?(p.grade||'PSA'):'',t:Date.now()});
   localStorage.setItem('hist',JSON.stringify(h.slice(0,200)));renderHist()}
 function renderHist(){const h=H();let tot=0;$('history').innerHTML=h.map((x,i)=>{tot+=x.usd||0;return `<div class="h" data-i="${i}"><img src="${x.img}" alt=""><div>${x.name}<div class="muted">${x.set} #${x.num} ${x.grade?'· '+x.grade:''}</div></div><div class="p">${money(x.usd)}<div class="muted">${thb(x.usd)}</div></div></div>`}).join('');
   $('total').textContent=h.length?`${h.length} cards · ${money(tot)} · ${thb(tot)}`:'';
-  document.querySelectorAll('.h').forEach(el=>el.onclick=async()=>{const x=h[+el.dataset.i];const d=await q(`id:${x.id}`,1);if(d[0])showResult(d[0],x.grade?{psa:true,grade:x.grade}:null,false)})}
+  document.querySelectorAll('.h').forEach(el=>el.onclick=async()=>{const x=h[+el.dataset.i];const d=x.id.startsWith('tdx:')?[fromTdx(await tdxJSON('/cards/'+encodeURIComponent(x.id.slice(4))))]:await q(`id:${x.id}`,1);if(d[0])showResult(d[0],x.grade?{psa:true,grade:x.grade}:null,false)})}
 
 /* ---------- Pipeline ---------- */
 async function processCanvas(cv){
@@ -148,7 +195,7 @@ async function processCanvas(cv){
   $('ocrText').textContent=`Parsed: ${JSON.stringify({number:p.number,total:p.total,psa:p.psa,grade:p.grade,cert:p.cert,words:p.words.slice(0,8)})}\n---\n${p.raw}`;
   status('Looking up prices…');
   let list=[];try{list=await findCards(p)}catch(e){status('Price lookup failed: '+e.message);return {p,list}}
-  const ms=Math.round(performance.now()-t0);
+  const ms=Math.round(performance.now()-t0);window.__ms=ms;
   if(!list.length){status(`No match (${ms} ms). Try again closer / better light, or type the name below.`);return {p,list}}
   showResult(list[0].c,p);showMatches(list,p);
   status(list.length>1?`Best match shown (${ms} ms) — tap another below if wrong.`:`Found in ${ms} ms`);

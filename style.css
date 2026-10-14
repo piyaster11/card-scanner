@@ -18,3 +18,4 @@ table{width:100%;font-size:13px;border-collapse:collapse}td{padding:3px 2px;bord
 .grade{background:#c8102e;color:#fff;padding:6px 10px;border-radius:8px;font-weight:800;display:inline-block;margin:4px 0}
 .histhead{display:flex;justify-content:space-between;align-items:center}.h{display:flex;gap:8px;align-items:center;border-bottom:1px solid #222;padding:6px 0}
 .h img{width:40px;border-radius:4px}.h .p{margin-left:auto;text-align:right;color:#7CFC9A}footer{color:#666;font-size:12px;margin-top:20px}
+.src{color:#6aa7ff;font-size:11px}
