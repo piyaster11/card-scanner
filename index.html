@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0d12"><title>Card Scanner</title>
+<link rel="manifest" href="manifest.json"><link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css"></head><body>
+<header><h1>🃏 Card Scanner</h1><span id="ocrStatus" class="pill">Loading OCR…</span></header>
+<section id="camWrap"><video id="video" playsinline muted autoplay></video><div class="guide"></div>
+<div id="camMsg" class="cammsg">Tap “Start camera”</div></section>
+<div class="row"><button id="startCam" class="btn">📷 Start camera</button><button id="scanBtn" class="btn primary" disabled>SCAN</button></div>
+<div class="row"><label class="btn">🖼️ Upload photo<input id="file" type="file" accept="image/*" hidden></label>
+<select id="mode" class="btn"><option value="auto">Auto (raw / PSA)</option><option value="raw">Raw card</option><option value="psa">PSA slab</option></select></div>
+<form id="searchForm" class="row"><input id="q" placeholder="Name or name + number e.g. Charizard 4/102" autocomplete="off"><button class="btn">🔎</button></form>
+<div id="status" class="status"></div><details><summary class="muted">OCR text (debug)</summary><pre id="ocrText" class="ocr"></pre></details>
+<section id="matches"></section><section id="result"></section>
+<section><div class="histhead"><h2>History</h2><div><b id="total"></b> <button id="clearHist" class="btn small">Clear</button></div></div><div id="history"></div></section>
+<footer>Prices: TCGplayer & Cardmarket via pokemontcg.io (raw/ungraded). FX: open.er-api.com. Graded prices: use sold-listing links — no free graded-price API exists.</footer>
+<canvas id="cv" hidden></canvas>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="app.js"></script></body></html>
